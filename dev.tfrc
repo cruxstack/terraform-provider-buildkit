@@ -1,0 +1,11 @@
+# local dev override so terraform/opentofu uses the freshly built provider
+# binary in this directory instead of downloading from a registry. usage:
+#   export TF_CLI_CONFIG_FILE=$PWD/dev.tfrc
+# the directory below must contain the built `terraform-provider-buildkit`
+# binary. it is replaced at runtime by the smoke-test script with an abs path.
+provider_installation {
+  dev_overrides {
+    "cruxstack/buildkit" = "DEV_OVERRIDE_DIR"
+  }
+  direct {}
+}

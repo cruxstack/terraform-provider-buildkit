@@ -1,0 +1,16 @@
+# built provider binary
+terraform-provider-buildkit
+terraform-provider-buildkit_v*
+
+# goreleaser output
+dist/
+
+# editor / os
+.DS_Store
+
+# example state / artifacts
+examples/**/.terraform
+examples/**/.terraform.lock.hcl
+examples/**/terraform.tfstate
+examples/**/terraform.tfstate.backup
+examples/**/dist/

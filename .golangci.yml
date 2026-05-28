@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+    - unconvert
+    - unused
+
+  exclusions:
+    rules:
+      # generated tooling and tests use loose patterns
+      - path: _test\.go
+        linters:
+          - errcheck
