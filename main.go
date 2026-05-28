@@ -16,11 +16,13 @@ import (
 // the examples/ directory.
 //go:generate go tool tfplugindocs generate --provider-name buildkit
 
-// these are overridden via -ldflags at build time for release builds. for the
-// local prototype they are informational only.
+// these are overridden via -ldflags at build time for release builds.
 var (
 	version = "dev"
+	commit  = ""
 )
+
+var _ = commit
 
 func main() {
 	var debug bool

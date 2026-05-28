@@ -13,6 +13,14 @@ Builds a Dockerfile via BuildKit and extracts an artifact (file as zip, or a dir
 ## Example Usage
 
 ```terraform
+# Build a Dockerfile and extract an artifact (a zip, or a directory tree) from
+# the built stage onto the host filesystem - no Docker daemon, no local-exec.
+# A common use is producing a Lambda deployment package.
+
+data "buildkit_context" "app" {
+  path = "${path.module}/app"
+}
+
 resource "buildkit_artifact" "lambda" {
   build_context     = "${path.module}/app"
   dockerfile        = "Dockerfile"
@@ -24,9 +32,14 @@ resource "buildkit_artifact" "lambda" {
   build_args = {
     NODE_ENV = "production"
   }
+
+  # Rebuild when the context changes.
+  triggers = {
+    context = data.buildkit_context.app.digest
+  }
 }
 
-# consume the produced artifact, e.g. an AWS Lambda deployment package.
+# Consume the produced artifact, e.g. an AWS Lambda deployment package.
 resource "aws_lambda_function" "this" {
   function_name    = "example"
   runtime          = "nodejs20.x"
@@ -51,11 +64,23 @@ resource "aws_lambda_function" "this" {
 - `artifact_src_type` (String) Either `zip` (default) or `directory`.
 - `build_args` (Map of String) Build arguments passed to the build.
 - `dockerfile` (String) Dockerfile path relative to the build context. Defaults to `Dockerfile`.
-- `force_rebuild_id` (String) Change this value to force a rebuild.
 - `target` (String) Optional multi-stage build target whose filesystem is exported.
+- `triggers` (Map of String) Arbitrary map; any change forces the artifact to be rebuilt. Commonly wired to a `buildkit_context` digest.
 
 ### Read-Only
 
 - `artifact_path` (String) Absolute host path of the produced artifact.
 - `artifact_sha256` (String) SHA256 of the produced artifact (file) used for drift detection.
+- `context_digest` (String) Dockerignore-aware sha256 of the build context at build time.
 - `id` (String) Synthetic resource id (equals artifact_sha256).
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# buildkit_artifact is imported by its destination path on the host.
+terraform import buildkit_artifact.lambda /abs/path/to/dist/package.zip
+```

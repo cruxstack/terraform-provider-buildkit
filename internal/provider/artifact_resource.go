@@ -13,26 +13,30 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/cruxstack/terraform-provider-buildkit/internal/provider/buildengine"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/moby/buildkit/client"
 )
 
 var (
-	_ resource.Resource              = (*artifactResource)(nil)
-	_ resource.ResourceWithConfigure = (*artifactResource)(nil)
+	_ resource.Resource                = (*artifactResource)(nil)
+	_ resource.ResourceWithConfigure   = (*artifactResource)(nil)
+	_ resource.ResourceWithImportState = (*artifactResource)(nil)
 )
 
 type artifactResource struct {
 	provider *providerData
 }
 
-// artifactResourceModel maps the schema for the buildkit_artifact
-// resource. names intentionally mirror the v1 terraform module variables so the
-// eventual module rewrite is close to a drop-in.
+// artifactResourceModel maps the schema for the buildkit_artifact resource.
 type artifactResourceModel struct {
 	ID              types.String `tfsdk:"id"`
 	BuildContext    types.String `tfsdk:"build_context"`
@@ -42,9 +46,10 @@ type artifactResourceModel struct {
 	ArtifactSrcPath types.String `tfsdk:"artifact_src_path"`
 	ArtifactSrcType types.String `tfsdk:"artifact_src_type"`
 	ArtifactDstPath types.String `tfsdk:"artifact_dst_path"`
-	ForceRebuildID  types.String `tfsdk:"force_rebuild_id"`
+	Triggers        types.Map    `tfsdk:"triggers"`
 	ArtifactPath    types.String `tfsdk:"artifact_path"`
 	ArtifactSHA256  types.String `tfsdk:"artifact_sha256"`
+	ContextDigest   types.String `tfsdk:"context_digest"`
 }
 
 func NewArtifactResource() resource.Resource {
@@ -92,14 +97,19 @@ func (r *artifactResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:            true,
 				Computed:            true,
 				MarkdownDescription: "Either `zip` (default) or `directory`.",
+				Validators: []validator.String{
+					stringvalidator.OneOf("zip", "directory"),
+				},
 			},
 			"artifact_dst_path": schema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Destination path on the host for the extracted artifact.",
 			},
-			"force_rebuild_id": schema.StringAttribute{
+			"triggers": schema.MapAttribute{
 				Optional:            true,
-				MarkdownDescription: "Change this value to force a rebuild.",
+				ElementType:         types.StringType,
+				MarkdownDescription: "Arbitrary map; any change forces the artifact to be rebuilt. Commonly wired to a `buildkit_context` digest.",
+				PlanModifiers:       []planmodifier.Map{mapRequiresReplaceIfConfigured()},
 			},
 			"artifact_path": schema.StringAttribute{
 				Computed:            true,
@@ -108,6 +118,10 @@ func (r *artifactResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"artifact_sha256": schema.StringAttribute{
 				Computed:            true,
 				MarkdownDescription: "SHA256 of the produced artifact (file) used for drift detection.",
+			},
+			"context_digest": schema.StringAttribute{
+				Computed:            true,
+				MarkdownDescription: "Dockerignore-aware sha256 of the build context at build time.",
 			},
 		},
 	}
@@ -145,11 +159,28 @@ func (r *artifactResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 	// if the produced artifact no longer exists on disk, drop it from state so
-	// it gets rebuilt on the next apply.
-	if state.ArtifactPath.ValueString() != "" {
-		if _, err := os.Stat(state.ArtifactPath.ValueString()); err != nil {
+	// it gets rebuilt on the next apply. if it exists but its content hash has
+	// drifted from what we recorded, surface that drift.
+	p := state.ArtifactPath.ValueString()
+	if p != "" {
+		info, err := os.Stat(p)
+		if err != nil {
 			resp.State.RemoveResource(ctx)
 			return
+		}
+		var sum string
+		if info.IsDir() {
+			sum, err = sha256Tree(p)
+		} else {
+			sum, err = sha256File(p)
+		}
+		if err != nil {
+			resp.Diagnostics.AddError("hashing artifact during read", err.Error())
+			return
+		}
+		state.ArtifactSHA256 = types.StringValue(sum)
+		if state.ID.IsNull() || state.ID.ValueString() == "" {
+			state.ID = types.StringValue(sum)
 		}
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -178,6 +209,12 @@ func (r *artifactResource) Delete(ctx context.Context, req resource.DeleteReques
 	if p := state.ArtifactPath.ValueString(); p != "" {
 		_ = os.RemoveAll(p)
 	}
+}
+
+func (r *artifactResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	// import by destination path; subsequent read fills the hash.
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("artifact_dst_path"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("artifact_path"), req.ID)...)
 }
 
 // build runs the buildkit build, exports the stage fs, extracts the requested
@@ -215,13 +252,13 @@ func (r *artifactResource) build(ctx context.Context, m *artifactResourceModel, 
 	}
 	defer os.RemoveAll(exportDir)
 
-	err = runBuild(ctx, buildInput{
-		Client:     r.provider.client,
+	_, err = buildengine.Run(ctx, r.provider.client, buildengine.Request{
 		Context:    buildCtx,
 		Dockerfile: dockerfile,
 		Target:     m.Target.ValueString(),
 		BuildArgs:  buildArgs,
-		ExportDir:  exportDir,
+		Exports:    []client.ExportEntry{buildengine.LocalExport(exportDir)},
+		Auth:       r.provider.auth,
 	})
 	if err != nil {
 		diags.AddError("build failed", err.Error())
@@ -269,6 +306,12 @@ func (r *artifactResource) build(ctx context.Context, m *artifactResourceModel, 
 	m.ArtifactPath = types.StringValue(dstPath)
 	m.ArtifactSHA256 = types.StringValue(sum)
 	m.ID = types.StringValue(sum)
+
+	if ch, err := buildengine.HashContext(buildCtx, ""); err == nil {
+		m.ContextDigest = types.StringValue(ch)
+	} else {
+		m.ContextDigest = types.StringNull()
+	}
 }
 
 // ---- helpers -----------------------------------------------------------------

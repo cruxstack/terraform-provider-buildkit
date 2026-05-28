@@ -4,6 +4,7 @@
 package provider
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
@@ -21,4 +22,9 @@ var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServe
 func testAccPreCheck(t *testing.T) {
 	t.Helper()
 	// no required env vars yet; auto-discovery covers the common local case.
+}
+
+// regexpSHA256 matches a "sha256:<hex>" digest string.
+func regexpSHA256() *regexp.Regexp {
+	return regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 }

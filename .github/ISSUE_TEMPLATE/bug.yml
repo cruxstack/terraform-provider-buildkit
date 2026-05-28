@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a problem with the provider
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a bug report.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Terraform/OpenTofu configuration
+      description: Minimal configuration that reproduces the issue. Redact secrets.
+      render: hcl
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output, ideally with TF_LOG=DEBUG. Redact secrets.
+      render: text
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider version
+    validations:
+      required: true
+  - type: input
+    id: tf-version
+    attributes:
+      label: Terraform / OpenTofu version
+    validations:
+      required: true
+  - type: input
+    id: buildkit
+    attributes:
+      label: BuildKit endpoint
+      description: How is BuildKit reached (auto-discovery, BUILDKIT_HOST, explicit address, embedded), and which buildkitd version?
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Host OS / arch
+    validations:
+      required: true

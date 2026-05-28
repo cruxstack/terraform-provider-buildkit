@@ -22,8 +22,16 @@ import (
 // resolvedEndpoint is the outcome of discovery: a connected buildkit client and
 // a human-readable description of how it was reached (for logging).
 type resolvedEndpoint struct {
-	client *bkclient.Client
-	source string
+	client  *bkclient.Client
+	source  string
+	cleanup func()
+}
+
+// resolveOptions controls endpoint resolution.
+type resolveOptions struct {
+	address      string
+	autodiscover bool
+	embedded     bool
 }
 
 // resolveBuildkit finds and connects to a buildkit endpoint.
@@ -39,16 +47,16 @@ type resolvedEndpoint struct {
 //  4. conventional local buildkitd sockets (rootless / system).
 //
 // each candidate is validated with a ListWorkers ping before acceptance.
-func resolveBuildkit(ctx context.Context, address string, autodiscover bool) (*resolvedEndpoint, error) {
+func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoint, error) {
 	var tried []string
 
 	// 1. explicit address.
-	if address != "" {
-		c, err := dialDirect(ctx, address)
+	if opts.address != "" {
+		c, err := dialDirect(ctx, opts.address)
 		if err != nil {
-			return nil, fmt.Errorf("connecting to configured buildkit_address %q: %w", address, err)
+			return nil, fmt.Errorf("connecting to configured buildkit_address %q: %w", opts.address, err)
 		}
-		return &resolvedEndpoint{client: c, source: "buildkit_address=" + address}, nil
+		return &resolvedEndpoint{client: c, source: "buildkit_address=" + opts.address}, nil
 	}
 
 	// 2. BUILDKIT_HOST.
@@ -61,37 +69,44 @@ func resolveBuildkit(ctx context.Context, address string, autodiscover bool) (*r
 	}
 	tried = append(tried, "BUILDKIT_HOST (unset)")
 
-	if !autodiscover {
-		return nil, fmt.Errorf(
-			"no buildkit endpoint: set buildkit_address or BUILDKIT_HOST (buildkit_autodiscover is disabled)",
-		)
-	}
+	if opts.autodiscover {
+		// 3. docker engine embedded buildkit via /grpc.
+		if c, src, err := dialDockerGRPC(ctx); err == nil {
+			return &resolvedEndpoint{client: c, source: src}, nil
+		} else {
+			tried = append(tried, "docker engine /grpc ("+err.Error()+")")
+		}
 
-	// 3. docker engine embedded buildkit via /grpc.
-	if c, src, err := dialDockerGRPC(ctx); err == nil {
-		return &resolvedEndpoint{client: c, source: src}, nil
+		// 4. conventional local buildkitd sockets.
+		for _, sock := range localSocketCandidates() {
+			if _, err := os.Stat(strings.TrimPrefix(sock, "unix://")); err != nil {
+				tried = append(tried, sock+" (not found)")
+				continue
+			}
+			c, err := dialDirect(ctx, sock)
+			if err != nil {
+				tried = append(tried, sock+" ("+err.Error()+")")
+				continue
+			}
+			return &resolvedEndpoint{client: c, source: sock}, nil
+		}
 	} else {
-		tried = append(tried, "docker engine /grpc ("+err.Error()+")")
+		tried = append(tried, "auto-discovery (disabled)")
 	}
 
-	// 4. conventional local buildkitd sockets.
-	for _, sock := range localSocketCandidates() {
-		if _, err := os.Stat(strings.TrimPrefix(sock, "unix://")); err != nil {
-			tried = append(tried, sock+" (not found)")
-			continue
-		}
-		c, err := dialDirect(ctx, sock)
+	// 5. embedded rootless buildkitd (Linux only, opt-in).
+	if opts.embedded {
+		ep, err := startEmbeddedBuildkitd(ctx)
 		if err != nil {
-			tried = append(tried, sock+" ("+err.Error()+")")
-			continue
+			return nil, fmt.Errorf("embedded_buildkitd requested but failed to start: %w", err)
 		}
-		return &resolvedEndpoint{client: c, source: sock}, nil
+		return ep, nil
 	}
 
 	return nil, fmt.Errorf(
 		"could not find a buildkit endpoint. tried: %s. "+
-			"fix by setting buildkit_address, exporting BUILDKIT_HOST, starting Colima/Lima, "+
-			"or running `docker buildx create`",
+			"fix by setting buildkit_address, exporting BUILDKIT_HOST, enabling embedded_buildkitd (Linux), "+
+			"starting Colima/Lima/OrbStack, or running `docker buildx create`",
 		strings.Join(tried, "; "),
 	)
 }

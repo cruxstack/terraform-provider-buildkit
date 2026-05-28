@@ -10,5 +10,7 @@ project {
     "docs/**",
     "examples/**",
     ".github/**",
+    # markdown / meta docs
+    "*.md",
   ]
 }

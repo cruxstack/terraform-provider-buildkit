@@ -13,9 +13,10 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - "-s -w -X main.version={{.Version}}"
+      - "-s -w -X main.version={{.Version}} -X main.commit={{.Commit}}"
     goos:
       - darwin
+      - freebsd
       - linux
       - windows
     goarch:
@@ -26,11 +27,13 @@ builds:
     goarm:
       - "7"
     ignore:
-      # buildkitd / the OCI worker only runs on linux & windows; darwin builds
-      # are client-only and 386/arm on darwin are not supported toolchains.
+      # darwin client builds: 386/arm are not supported toolchains.
       - goos: darwin
         goarch: "386"
       - goos: darwin
+        goarch: arm
+      # windows on arm is uncommon for this tooling.
+      - goos: windows
         goarch: arm
     binary: "{{ .ProjectName }}_v{{ .Version }}"
 
