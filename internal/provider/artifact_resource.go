@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -78,6 +79,7 @@ func (r *artifactResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"dockerfile": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
+				Default:             stringdefault.StaticString("Dockerfile"),
 				MarkdownDescription: "Dockerfile path relative to the build context. Defaults to `Dockerfile`.",
 			},
 			"target": schema.StringAttribute{
@@ -96,7 +98,8 @@ func (r *artifactResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"artifact_src_type": schema.StringAttribute{
 				Optional:            true,
 				Computed:            true,
-				MarkdownDescription: "Either `zip` (default) or `directory`.",
+				Default:             stringdefault.StaticString("zip"),
+				MarkdownDescription: "Either `zip` (default) or `directory`. When `zip` and `artifact_src_path` is a single file, the file is copied through verbatim (it is assumed already packaged, e.g. a pre-built `package.zip`); when it is a directory, the directory's contents are zipped.",
 				Validators: []validator.String{
 					stringvalidator.OneOf("zip", "directory"),
 				},
@@ -160,28 +163,41 @@ func (r *artifactResource) Read(ctx context.Context, req resource.ReadRequest, r
 	}
 	// if the produced artifact no longer exists on disk, drop it from state so
 	// it gets rebuilt on the next apply. if it exists but its content hash has
-	// drifted from what we recorded, surface that drift.
+	// drifted from what we recorded at build time, drop it as well so the next
+	// plan shows the resource needs to be recreated (this is how an out-of-band
+	// edit or partial write is surfaced as drift).
 	p := state.ArtifactPath.ValueString()
-	if p != "" {
-		info, err := os.Stat(p)
-		if err != nil {
-			resp.State.RemoveResource(ctx)
-			return
-		}
-		var sum string
-		if info.IsDir() {
-			sum, err = sha256Tree(p)
-		} else {
-			sum, err = sha256File(p)
-		}
-		if err != nil {
-			resp.Diagnostics.AddError("hashing artifact during read", err.Error())
-			return
-		}
-		state.ArtifactSHA256 = types.StringValue(sum)
-		if state.ID.IsNull() || state.ID.ValueString() == "" {
-			state.ID = types.StringValue(sum)
-		}
+	if p == "" {
+		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		return
+	}
+
+	info, err := os.Stat(p)
+	if err != nil {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+	var sum string
+	if info.IsDir() {
+		sum, err = sha256Tree(p)
+	} else {
+		sum, err = sha256File(p)
+	}
+	if err != nil {
+		resp.Diagnostics.AddError("hashing artifact during read", err.Error())
+		return
+	}
+
+	recorded := state.ArtifactSHA256.ValueString()
+	if recorded != "" && recorded != sum {
+		// content drifted from what we built; force a rebuild on next apply.
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	state.ArtifactSHA256 = types.StringValue(sum)
+	if state.ID.IsNull() || state.ID.ValueString() == "" {
+		state.ID = types.StringValue(sum)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -220,16 +236,10 @@ func (r *artifactResource) ImportState(ctx context.Context, req resource.ImportS
 // build runs the buildkit build, exports the stage fs, extracts the requested
 // artifact to the destination, and fills in computed fields on the model.
 func (r *artifactResource) build(ctx context.Context, m *artifactResourceModel, diags *diag.Diagnostics) {
+	// dockerfile and artifact_src_type carry schema defaults ("Dockerfile",
+	// "zip") applied to the plan, so they are always set here.
 	dockerfile := m.Dockerfile.ValueString()
-	if dockerfile == "" {
-		dockerfile = "Dockerfile"
-		m.Dockerfile = types.StringValue(dockerfile)
-	}
 	srcType := m.ArtifactSrcType.ValueString()
-	if srcType == "" {
-		srcType = "zip"
-		m.ArtifactSrcType = types.StringValue(srcType)
-	}
 
 	buildArgs := map[string]string{}
 	if !m.BuildArgs.IsNull() {
@@ -250,9 +260,15 @@ func (r *artifactResource) build(ctx context.Context, m *artifactResourceModel, 
 		diags.AddError("creating temp export dir", err.Error())
 		return
 	}
-	defer os.RemoveAll(exportDir)
+	defer func() { _ = os.RemoveAll(exportDir) }()
 
-	_, err = buildengine.Run(ctx, r.provider.client, buildengine.Request{
+	bkc, err := r.provider.client(ctx)
+	if err != nil {
+		diags.AddError("Could not connect to BuildKit", err.Error())
+		return
+	}
+
+	_, err = buildengine.Run(ctx, bkc, buildengine.Request{
 		Context:    buildCtx,
 		Dockerfile: dockerfile,
 		Target:     m.Target.ValueString(),
@@ -321,24 +337,21 @@ func zipPath(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	zw := zip.NewWriter(out)
-	defer zw.Close()
 
 	if !info.IsDir() {
 		// src is already a single file (e.g. a pre-built package.zip produced
 		// inside the dockerfile). copy it through verbatim rather than nesting
 		// it inside another zip, matching the v1 `docker cp` behavior.
-		zw.Close()
-		out.Close()
 		return copyFile(src, dst, info.Mode())
 	}
-	return filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	zw := zip.NewWriter(out)
+
+	walkErr := filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -351,6 +364,16 @@ func zipPath(src, dst string) error {
 		}
 		return addFileToZip(zw, path, rel)
 	})
+
+	// close the zip writer (flushes the central directory) then the file,
+	// checking both close errors on this write path.
+	if cerr := zw.Close(); cerr != nil && walkErr == nil {
+		walkErr = cerr
+	}
+	if cerr := out.Close(); cerr != nil && walkErr == nil {
+		walkErr = cerr
+	}
+	return walkErr
 }
 
 func addFileToZip(zw *zip.Writer, path, name string) error {
@@ -358,7 +381,7 @@ func addFileToZip(zw *zip.Writer, path, name string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	w, err := zw.Create(name)
 	if err != nil {
 		return err
@@ -389,7 +412,7 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -397,9 +420,13 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	// check the close error on this write path: a deferred, ignored Close can
+	// mask a truncated/short write.
+	return out.Close()
 }
 
 func sha256File(path string) (string, error) {
@@ -414,7 +441,7 @@ func sha256File(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -440,8 +467,8 @@ func sha256Tree(root string) (string, error) {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		_, err = io.Copy(h, f)
+		_ = f.Close()
 		return err
 	})
 	if err != nil {

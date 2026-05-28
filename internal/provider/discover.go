@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	dockerclient "github.com/docker/docker/client"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 	bkclient "github.com/moby/buildkit/client"
 
 	// register connection helpers so addresses like docker-container:// work
@@ -94,10 +95,12 @@ func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoin
 		tried = append(tried, "auto-discovery (disabled)")
 	}
 
-	// 5. embedded rootless buildkitd (Linux only, opt-in).
+	// 5. embedded rootless buildkitd (Linux only, opt-in). on non-Linux builds
+	// startEmbeddedBuildkitd always returns an error, which staticcheck flags as
+	// an always-true comparison (SA4023) for that GOOS; it is reachable on Linux.
 	if opts.embedded {
 		ep, err := startEmbeddedBuildkitd(ctx)
-		if err != nil {
+		if err != nil { //nolint:staticcheck // SA4023: only always-true on non-Linux builds
 			return nil, fmt.Errorf("embedded_buildkitd requested but failed to start: %w", err)
 		}
 		return ep, nil
@@ -114,15 +117,48 @@ func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoin
 // dialDirect connects using buildkit's own client (handles tcp://, unix://, and
 // registered connhelper schemes like docker-container://) and validates it.
 func dialDirect(ctx context.Context, address string) (*bkclient.Client, error) {
+	warnInsecureTCP(ctx, address)
 	c, err := bkclient.New(ctx, address)
 	if err != nil {
 		return nil, err
 	}
 	if err := validate(ctx, c); err != nil {
-		c.Close()
+		_ = c.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// warnInsecureTCP logs a warning when connecting to a non-loopback tcp:// host.
+// The buildkit client speaks plaintext h2c over tcp:// without TLS, so any
+// non-loopback endpoint exposes credentials and build inputs on the wire. Use a
+// unix socket, a connection helper (docker-container://), or an SSH/TLS tunnel
+// for remote daemons.
+func warnInsecureTCP(ctx context.Context, address string) {
+	if !strings.HasPrefix(address, "tcp://") {
+		return
+	}
+	host := strings.TrimPrefix(address, "tcp://")
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if isLoopbackHost(host) {
+		return
+	}
+	tflog.Warn(ctx, "connecting to a non-loopback buildkit endpoint over plaintext tcp://; "+
+		"credentials and build context are sent unencrypted. Prefer a unix socket, a "+
+		"docker-container:// connection helper, or an SSH/TLS tunnel for remote daemons.",
+		map[string]any{"address": address})
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // dialDockerGRPC reaches the buildkit instance compiled into the docker engine
@@ -154,7 +190,7 @@ func dialDockerGRPC(ctx context.Context) (*bkclient.Client, string, error) {
 		return nil, "", fmt.Errorf("buildkit /grpc dial: %w", err)
 	}
 	if err := validate(ctx, c); err != nil {
-		c.Close()
+		_ = c.Close()
 		_ = dcli.Close()
 		return nil, "", fmt.Errorf("buildkit /grpc validate: %w", err)
 	}

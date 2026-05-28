@@ -61,7 +61,7 @@ resource "aws_lambda_function" "this" {
 
 ### Optional
 
-- `artifact_src_type` (String) Either `zip` (default) or `directory`.
+- `artifact_src_type` (String) Either `zip` (default) or `directory`. When `zip` and `artifact_src_path` is a single file, the file is copied through verbatim (it is assumed already packaged, e.g. a pre-built `package.zip`); when it is a directory, the directory's contents are zipped.
 - `build_args` (Map of String) Build arguments passed to the build.
 - `dockerfile` (String) Dockerfile path relative to the build context. Defaults to `Dockerfile`.
 - `target` (String) Optional multi-stage build target whose filesystem is exported.

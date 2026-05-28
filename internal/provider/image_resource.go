@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/cruxstack/terraform-provider-buildkit/internal/provider/buildengine"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -19,6 +20,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -109,7 +111,7 @@ func (r *imageResource) Metadata(_ context.Context, req resource.MetadataRequest
 
 func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations.",
+		MarkdownDescription: "Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations. With no `publish` blocks the image is built (and a digest computed) but not pushed; with `publish` blocks all blocks must agree on the `push` and `insecure` flags.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:            true,
@@ -186,7 +188,7 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 			},
 		},
 		Blocks: map[string]schema.Block{
-			"ssh": schema.ListNestedBlock{
+			"ssh": schema.SetNestedBlock{
 				MarkdownDescription: "Explicit ssh agent/socket forwards (`RUN --mount=type=ssh,id=...`).",
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{
@@ -195,23 +197,23 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					},
 				},
 			},
-			"publish": schema.ListNestedBlock{
-				MarkdownDescription: "A registry/repository and the tags to publish. Multiple blocks publish to multiple targets in a single build.",
+			"publish": schema.SetNestedBlock{
+				MarkdownDescription: "A registry/repository and the tags to publish. Multiple blocks publish to multiple targets in a single build. All publish blocks must agree on the `push` and `insecure` flags.",
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{
-						"registry":   schema.StringAttribute{Required: true, MarkdownDescription: "Registry host, e.g. `docker.io` or `ghcr.io`."},
-						"repository": schema.StringAttribute{Required: true, MarkdownDescription: "Repository name, e.g. `org/app`."},
+						"registry":   schema.StringAttribute{Required: true, MarkdownDescription: "Registry host, e.g. `docker.io` or `ghcr.io`.", Validators: []validator.String{stringvalidator.LengthAtLeast(1)}},
+						"repository": schema.StringAttribute{Required: true, MarkdownDescription: "Repository name, e.g. `org/app`.", Validators: []validator.String{stringvalidator.LengthAtLeast(1)}},
 						"tags":       schema.ListAttribute{Required: true, ElementType: types.StringType, MarkdownDescription: "Tags to publish."},
 						"push":       schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(true), MarkdownDescription: "Push to the registry. Defaults to `true`."},
 						"insecure":   schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), MarkdownDescription: "Allow pushing over plain HTTP / untrusted TLS (sets `registry.insecure=true`). Also used for digest lookups during refresh."},
 					},
 				},
 			},
-			"cache_from": schema.ListNestedBlock{
+			"cache_from": schema.SetNestedBlock{
 				MarkdownDescription: "Cache import sources (`--import-cache`).",
 				NestedObject:        cacheBlockObject(),
 			},
-			"cache_to": schema.ListNestedBlock{
+			"cache_to": schema.SetNestedBlock{
 				MarkdownDescription: "Cache export targets (`--export-cache`).",
 				NestedObject:        cacheBlockObject(),
 			},
@@ -219,7 +221,7 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				MarkdownDescription: "Attach SBOM and/or provenance attestations to the build output.",
 				Attributes: map[string]schema.Attribute{
 					"sbom":       schema.BoolAttribute{Optional: true, MarkdownDescription: "Generate an SBOM attestation."},
-					"provenance": schema.StringAttribute{Optional: true, MarkdownDescription: "Provenance mode: `min` or `max`."},
+					"provenance": schema.StringAttribute{Optional: true, MarkdownDescription: "Provenance mode: `min` or `max`.", Validators: []validator.String{stringvalidator.OneOf("min", "max")}},
 				},
 			},
 		},
@@ -229,7 +231,11 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 func cacheBlockObject() schema.NestedBlockObject {
 	return schema.NestedBlockObject{
 		Attributes: map[string]schema.Attribute{
-			"type":  schema.StringAttribute{Required: true, MarkdownDescription: "Cache type: `registry`, `local`, `gha`, or `inline`."},
+			"type": schema.StringAttribute{
+				Required:            true,
+				MarkdownDescription: "Cache type: `registry`, `local`, `gha`, `inline`, `s3`, or `azblob`.",
+				Validators:          []validator.String{stringvalidator.OneOf("registry", "local", "gha", "inline", "s3", "azblob")},
+			},
 			"attrs": schema.MapAttribute{Optional: true, ElementType: types.StringType, MarkdownDescription: "Type-specific attributes (e.g. `ref`, `mode`, `dest`, `src`)."},
 		},
 	}
@@ -328,7 +334,62 @@ func (r *imageResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 }
 
 func (r *imageResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	resource.ImportStatePassthroughID(ctx, path.Root("image_digest"), req, resp)
+	// the import id is a fully-qualified digest reference, e.g.
+	// ghcr.io/org/app@sha256:abc... we parse it into image_digest (the bare
+	// sha256:...) plus a single published entry so a subsequent Read can refresh
+	// the digest and so digest_url is populated. context/dockerfile/platforms
+	// are required in config and are reconciled from the user's resource block
+	// on the next plan.
+	registry, repository, digest, err := parseDigestRef(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"invalid import id",
+			fmt.Sprintf("expected a digest reference like registry/repo@sha256:... but got %q: %s", req.ID, err),
+		)
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("image_digest"), digest)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), digest)...)
+
+	published := []publishedModel{{
+		Registry:   types.StringValue(registry),
+		Repository: types.StringValue(repository),
+		Tag:        types.StringNull(),
+		TagURL:     types.StringNull(),
+		DigestURL:  types.StringValue(registry + "/" + repository + "@" + digest),
+		Insecure:   types.BoolValue(false),
+	}}
+	lv, d := types.ListValueFrom(ctx, types.ObjectType{AttrTypes: publishedAttrTypes()}, published)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("published"), lv)...)
+}
+
+// parseDigestRef splits a fully-qualified digest reference of the form
+// registry/repository@sha256:hex into its parts. The registry component is
+// required (the resource always publishes to an explicit registry host).
+func parseDigestRef(ref string) (registry, repository, digest string, err error) {
+	at := strings.LastIndex(ref, "@")
+	if at < 0 {
+		return "", "", "", fmt.Errorf("missing '@sha256:...' digest")
+	}
+	name, dig := ref[:at], ref[at+1:]
+	if !strings.HasPrefix(dig, "sha256:") || len(dig) != len("sha256:")+64 {
+		return "", "", "", fmt.Errorf("digest must be a sha256:<64-hex> value")
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(name, "https://"), "http://"), "/")
+	slash := strings.Index(name, "/")
+	if slash < 0 {
+		return "", "", "", fmt.Errorf("reference must include a registry host and repository")
+	}
+	registry, repository = name[:slash], name[slash+1:]
+	if registry == "" || repository == "" {
+		return "", "", "", fmt.Errorf("reference must include a registry host and repository")
+	}
+	return registry, repository, dig, nil
 }
 
 // build runs the image build/push and fills computed fields.
@@ -356,7 +417,10 @@ func (r *imageResource) build(ctx context.Context, m *imageResourceModel, diags 
 		return
 	}
 
-	// expand publish blocks into image names.
+	// expand publish blocks into image names. BuildKit supports a single image
+	// exporter per solve, so the push/insecure flags must be uniform across all
+	// publish blocks; mixed values are rejected rather than silently coerced
+	// (which previously OR-ed the flags and could downgrade a secure push).
 	var names []string
 	for _, p := range m.Publish {
 		var tags []string
@@ -364,11 +428,14 @@ func (r *imageResource) build(ctx context.Context, m *imageResourceModel, diags 
 		if diags.HasError() {
 			return
 		}
-		push := p.Push.ValueBool()
-		_ = push
 		for _, t := range tags {
 			names = append(names, fullRef(p.Registry.ValueString(), p.Repository.ValueString(), t))
 		}
+	}
+	push, insecure, perr := uniformPublishFlags(m.Publish)
+	if perr != nil {
+		diags.AddError("inconsistent publish blocks", perr.Error())
+		return
 	}
 
 	req := buildengine.Request{
@@ -394,12 +461,21 @@ func (r *imageResource) build(ctx context.Context, m *imageResourceModel, diags 
 		}
 	}
 	if len(names) > 0 {
-		push := anyPush(m.Publish)
-		insecure := anyInsecure(m.Publish)
 		req.Exports = append(req.Exports, buildengine.ImageExport(names, push, insecure))
+	} else {
+		// no publish blocks: build only, but still ask BuildKit for an image
+		// exporter (without a name and without pushing) so a deterministic
+		// image_digest is produced for state instead of an empty string.
+		req.Exports = append(req.Exports, buildengine.ImageExport(nil, false, false))
 	}
 
-	resp, err := buildengine.Run(ctx, r.provider.client, req)
+	bkc, err := r.provider.client(ctx)
+	if err != nil {
+		diags.AddError("Could not connect to BuildKit", err.Error())
+		return
+	}
+
+	resp, err := buildengine.Run(ctx, bkc, req)
 	if err != nil {
 		diags.AddError("image build failed", err.Error())
 		return
@@ -533,20 +609,28 @@ func fullRef(registry, repository, tag string) string {
 	return registry + "/" + repository + ":" + tag
 }
 
-func anyPush(blocks []publishModel) bool {
-	for _, b := range blocks {
-		if b.Push.ValueBool() {
-			return true
+// uniformPublishFlags collapses the push/insecure flags across all publish
+// blocks into the single pair BuildKit's image exporter accepts. Because one
+// solve emits exactly one image export, every block must agree on both flags;
+// any disagreement is an error so a secure push is never silently downgraded to
+// insecure (or vice versa) by a neighbouring block.
+func uniformPublishFlags(blocks []publishModel) (push, insecure bool, err error) {
+	if len(blocks) == 0 {
+		return false, false, nil
+	}
+	push = blocks[0].Push.ValueBool()
+	insecure = blocks[0].Insecure.ValueBool()
+	for _, b := range blocks[1:] {
+		if b.Push.ValueBool() != push {
+			return false, false, fmt.Errorf(
+				"all publish blocks must use the same `push` value in a single build; " +
+					"split differing push settings into separate buildkit_image resources")
+		}
+		if b.Insecure.ValueBool() != insecure {
+			return false, false, fmt.Errorf(
+				"all publish blocks must use the same `insecure` value in a single build; " +
+					"split differing insecure settings into separate buildkit_image resources")
 		}
 	}
-	return false
-}
-
-func anyInsecure(blocks []publishModel) bool {
-	for _, b := range blocks {
-		if b.Insecure.ValueBool() {
-			return true
-		}
-	}
-	return false
+	return push, insecure, nil
 }

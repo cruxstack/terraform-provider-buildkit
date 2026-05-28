@@ -13,9 +13,9 @@ import (
 )
 
 // TestAccContextDataSource hashes a context directory and asserts a sha256
-// digest is produced. Requires TF_ACC=1 and a reachable BuildKit endpoint
-// (the provider connects during Configure even though this data source does
-// not itself build).
+// digest is produced. Requires TF_ACC=1 but does not require a BuildKit
+// endpoint: the provider connects lazily and this data source only hashes a
+// local directory.
 func TestAccContextDataSource(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
 		t.Skip("set TF_ACC=1 to run acceptance tests (requires a BuildKit endpoint)")

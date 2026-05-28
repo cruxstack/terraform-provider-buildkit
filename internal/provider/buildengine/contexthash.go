@@ -88,16 +88,17 @@ func HashContext(contextDir, dockerignorePath string) (string, error) {
 
 	h := sha256.New()
 	for _, e := range entries {
-		fmt.Fprintf(h, "%s\x00%o\x00", e.rel, e.mode.Perm())
+		// h is a hash.Hash; its Write never returns an error.
+		_, _ = fmt.Fprintf(h, "%s\x00%o\x00", e.rel, e.mode.Perm())
 		f, err := os.Open(e.path)
 		if err != nil {
 			return "", err
 		}
 		if _, err := io.Copy(h, f); err != nil {
-			f.Close()
+			_ = f.Close()
 			return "", err
 		}
-		f.Close()
+		_ = f.Close()
 		h.Write([]byte{0})
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil

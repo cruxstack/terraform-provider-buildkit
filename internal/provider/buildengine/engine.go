@@ -224,11 +224,16 @@ func LocalExport(dir string) client.ExportEntry {
 }
 
 // ImageExport returns an ExportEntry that produces (and optionally pushes) an
-// image under the given comma-joined names. When insecure is true, pushes are
-// allowed over plain HTTP / with untrusted TLS (registry.insecure=true).
+// image under the given comma-joined names. When names is empty the image is
+// built without a name (no push), which still yields a containerimage.digest in
+// the exporter response. When insecure is true, pushes are allowed over plain
+// HTTP / with untrusted TLS (registry.insecure=true).
 func ImageExport(names []string, push, insecure bool) client.ExportEntry {
-	sort.Strings(names)
-	attrs := map[string]string{"name": strings.Join(names, ",")}
+	attrs := map[string]string{}
+	if len(names) > 0 {
+		sort.Strings(names)
+		attrs["name"] = strings.Join(names, ",")
+	}
 	if push {
 		attrs["push"] = "true"
 	}

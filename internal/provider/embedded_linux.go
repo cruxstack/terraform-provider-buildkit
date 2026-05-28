@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	bkclient "github.com/moby/buildkit/client"
@@ -78,16 +79,27 @@ func startEmbeddedBuildkitd(ctx context.Context) (*resolvedEndpoint, error) {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 
+	// run the daemon (and, for rootless, its rootlesskit-reexeced children) in
+	// its own process group so cleanup can signal the whole group and avoid
+	// leaving orphaned buildkitd/runc processes if the provider exits.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(runDir)
 		return nil, fmt.Errorf("starting buildkitd: %w", err)
 	}
 
+	pgid := cmd.Process.Pid
 	cleanup := func() {
+		// signal the entire process group (negative pid) so rootlesskit's
+		// grandchildren are reaped too, then fall back to killing the direct
+		// child if the group signal did not apply.
+		_ = syscall.Kill(-pgid, syscall.SIGTERM)
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 			_, _ = cmd.Process.Wait()
 		}
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		_ = os.RemoveAll(runDir)
 	}
 

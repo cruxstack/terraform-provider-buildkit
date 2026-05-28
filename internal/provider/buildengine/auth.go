@@ -8,6 +8,7 @@ package buildengine
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	cliconfig "github.com/docker/cli/cli/config"
@@ -95,31 +96,65 @@ func NewAuthProvider(cfg AuthConfig) session.Attachable {
 	})
 }
 
-// configFileLazy loads ~/.docker/config.json on first use so we don't touch the
-// filesystem / credential helpers unless a registry host actually requires it.
+// configFileLazy resolves credentials from ~/.docker/config.json and its
+// configured credential helpers on demand. The parsed docker config file is
+// loaded at most once (it is cheap and self-caching in docker/cli), while each
+// distinct host is resolved and memoized independently so credentials work for
+// every registry a build touches, not just the first one queried.
+//
+// It is safe for concurrent use: BuildKit invokes the auth provider from
+// multiple goroutines during multi-platform builds.
 type configFileLazy struct {
-	loaded bool
-	auths  map[string]clitypes.AuthConfig
+	mu       sync.Mutex
+	loadOnce sync.Once
+	cf       dockerConfigFile
+	perHost  map[string]lookupResult
+}
+
+// dockerConfigFile is the subset of docker/cli's *configfile.ConfigFile that we
+// depend on, captured as an interface so tests can substitute a fake.
+type dockerConfigFile interface {
+	GetAuthConfig(host string) (clitypes.AuthConfig, error)
+}
+
+type lookupResult struct {
+	ac clitypes.AuthConfig
+	ok bool
+}
+
+func (c *configFileLazy) load() {
+	c.loadOnce.Do(func() {
+		if cf, err := cliconfig.Load(cliconfig.Dir()); err == nil && cf != nil {
+			c.cf = cf
+		}
+	})
 }
 
 func (c *configFileLazy) lookup(host string) (clitypes.AuthConfig, bool) {
-	if !c.loaded {
-		c.loaded = true
-		cf, err := cliconfig.Load(cliconfig.Dir())
-		if err == nil && cf != nil {
-			ac, err := cf.GetAuthConfig(host)
-			if err == nil && hasCreds(ac) {
-				if c.auths == nil {
-					c.auths = map[string]clitypes.AuthConfig{}
-				}
-				c.auths[normalizeHost(host)] = ac
-				return ac, true
-			}
-		}
-		return clitypes.AuthConfig{}, false
+	c.load()
+
+	key := normalizeHost(host)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.perHost == nil {
+		c.perHost = map[string]lookupResult{}
 	}
-	ac, ok := c.auths[normalizeHost(host)]
-	return ac, ok
+	if res, ok := c.perHost[key]; ok {
+		return res.ac, res.ok
+	}
+
+	res := lookupResult{}
+	if c.cf != nil {
+		// GetAuthConfig resolves through any configured credential helper for
+		// this host and falls back to the static auths map.
+		if ac, err := c.cf.GetAuthConfig(host); err == nil && hasCreds(ac) {
+			res = lookupResult{ac: ac, ok: true}
+		}
+	}
+	c.perHost[key] = res
+	return res.ac, res.ok
 }
 
 func hasCreds(ac clitypes.AuthConfig) bool {

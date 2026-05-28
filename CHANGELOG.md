@@ -41,8 +41,34 @@ and this project adheres to
   `triggers` (map of string) with replace-on-change semantics.
 - **BREAKING** `buildkit_artifact`: `artifact_src_type` is now validated to be
   one of `zip` or `directory`.
+- **BREAKING** `buildkit_image`: `publish`, `ssh`, `cache_from`, and `cache_to`
+  are now sets rather than ordered lists, so reordering blocks no longer shows a
+  diff or forces a rebuild.
+- `buildkit_image`: all `publish` blocks must now agree on the `push` and
+  `insecure` flags; mixed values are rejected at apply time instead of being
+  silently OR-ed together (which could downgrade a secure push to insecure).
+- `buildkit_image`: with no `publish` blocks the image is now built and a
+  deterministic `image_digest` is still computed (previously `image_digest` was
+  an empty string).
+- `buildkit_image` import now parses the `registry/repo@sha256:...` reference
+  into `image_digest` and a seeded `published` entry instead of storing the raw
+  id in `image_digest`.
 - `buildkit_artifact` `Read` now re-hashes the destination artifact and detects
-  drift (missing file or changed content), instead of only checking existence.
+  drift: a missing file or a content hash that differs from the one recorded at
+  build time drops the resource from state so the next apply rebuilds it.
+- The BuildKit connection is now established lazily on first build, so
+  configurations that use only `buildkit_context` (or the registry data sources)
+  no longer require a reachable daemon at plan time.
+- Registry credentials resolved from `~/.docker/config.json` now work for every
+  registry a build touches; previously only the first host queried during a
+  provider's lifetime resolved correctly.
+- `buildkit_image`: `attestations.provenance` is validated to be `min` or `max`,
+  and `cache_from`/`cache_to` `type` is validated against the supported
+  exporters.
+- Embedded buildkitd is now started in its own process group and its whole group
+  is signalled on cleanup, avoiding orphaned `buildkitd`/`runc` processes.
+- A warning is logged when connecting to a non-loopback `tcp://` endpoint, which
+  the BuildKit client speaks unencrypted.
 - Bumped `github.com/moby/buildkit` to `v0.29.0`.
 
 ### Notes

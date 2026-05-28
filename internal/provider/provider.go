@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"sync"
 
 	"github.com/cruxstack/terraform-provider-buildkit/internal/provider/buildengine"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -42,14 +43,45 @@ type providerModel struct {
 	RegistryAuth         []registryAuthModel `tfsdk:"registry_auth"`
 }
 
-// providerData is passed to resources after Configure. it carries the resolved,
-// connected buildkit client plus resolved registry auth so each resource does
-// not re-run discovery or re-resolve credentials.
+// providerData is passed to resources after Configure. it carries resolved
+// registry auth plus a lazily-established buildkit connection: discovery and the
+// ListWorkers ping only happen the first time a resource actually needs to build
+// (so e.g. the buildkit_context data source, which only hashes a directory, does
+// not require a reachable daemon).
 type providerData struct {
-	client  *bkclient.Client
-	source  string
-	auth    buildengine.AuthConfig
-	cleanup func()
+	auth buildengine.AuthConfig
+	opts resolveOptions
+
+	mu       sync.Mutex
+	resolved *resolvedEndpoint
+	resolErr error
+}
+
+// client returns the shared buildkit client, establishing the connection on
+// first use. It is safe for concurrent callers.
+func (d *providerData) client(ctx context.Context) (*bkclient.Client, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.resolved != nil {
+		return d.resolved.client, nil
+	}
+	if d.resolErr != nil {
+		return nil, d.resolErr
+	}
+
+	endpoint, err := resolveBuildkit(ctx, d.opts)
+	if err != nil {
+		d.resolErr = err
+		return nil, err
+	}
+	tflog.Info(ctx, "resolved buildkit endpoint", map[string]any{"source": endpoint.source})
+
+	d.resolved = endpoint
+	if endpoint.cleanup != nil {
+		registerProcessCleanup(endpoint.cleanup)
+	}
+	return endpoint.client, nil
 }
 
 func New(version string) func() provider.Provider {
@@ -144,18 +176,6 @@ func (p *buildkitProvider) Configure(ctx context.Context, req provider.Configure
 		embedded = config.EmbeddedBuildkitd.ValueBool()
 	}
 
-	endpoint, err := resolveBuildkit(ctx, resolveOptions{
-		address:      config.BuildkitAddress.ValueString(),
-		autodiscover: autodiscover,
-		embedded:     embedded,
-	})
-	if err != nil {
-		resp.Diagnostics.AddError("Could not connect to BuildKit", err.Error())
-		return
-	}
-
-	tflog.Info(ctx, "resolved buildkit endpoint", map[string]any{"source": endpoint.source})
-
 	auth := buildengine.AuthConfig{
 		Explicit:        map[string]buildengine.RegistryAuth{},
 		UseDockerConfig: dockerConfig,
@@ -171,18 +191,16 @@ func (p *buildkitProvider) Configure(ctx context.Context, req provider.Configure
 		}
 	}
 
+	// The buildkit connection is established lazily (see providerData.client) so
+	// configurations that only use the buildkit_context data source or the
+	// registry data sources do not require a reachable daemon at plan time.
 	data := &providerData{
-		client:  endpoint.client,
-		source:  endpoint.source,
-		auth:    auth,
-		cleanup: endpoint.cleanup,
-	}
-
-	// Terraform does not give providers an explicit teardown hook, so when we
-	// started a supervised process (embedded buildkitd) make sure it is reaped
-	// if the plugin process is terminated.
-	if endpoint.cleanup != nil {
-		registerProcessCleanup(endpoint.cleanup)
+		auth: auth,
+		opts: resolveOptions{
+			address:      config.BuildkitAddress.ValueString(),
+			autodiscover: autodiscover,
+			embedded:     embedded,
+		},
 	}
 
 	resp.ResourceData = data

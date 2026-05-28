@@ -3,12 +3,12 @@
 page_title: "buildkit_image Resource - buildkit"
 subcategory: ""
 description: |-
-  Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations.
+  Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations. With no publish blocks the image is built (and a digest computed) but not pushed; with publish blocks all blocks must agree on the push and insecure flags.
 ---
 
 # buildkit_image (Resource)
 
-Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations.
+Builds a container image from a Dockerfile with BuildKit and optionally pushes it to one or more registries in a single build. Supports multi-platform builds, build args, labels, build secrets, SSH agent forwarding, cache import/export, and SBOM/provenance attestations. With no `publish` blocks the image is built (and a digest computed) but not pushed; with `publish` blocks all blocks must agree on the `push` and `insecure` flags.
 
 ## Example Usage
 
@@ -88,14 +88,14 @@ output "pushed" {
 
 - `args` (Map of String) Build args (values for `ARG` instructions).
 - `attestations` (Block, Optional) Attach SBOM and/or provenance attestations to the build output. (see [below for nested schema](#nestedblock--attestations))
-- `cache_from` (Block List) Cache import sources (`--import-cache`). (see [below for nested schema](#nestedblock--cache_from))
-- `cache_to` (Block List) Cache export targets (`--export-cache`). (see [below for nested schema](#nestedblock--cache_to))
+- `cache_from` (Block Set) Cache import sources (`--import-cache`). (see [below for nested schema](#nestedblock--cache_from))
+- `cache_to` (Block Set) Cache export targets (`--export-cache`). (see [below for nested schema](#nestedblock--cache_to))
 - `forward_ssh_agent_socket` (Boolean) Forward the host `SSH_AUTH_SOCK` as the `default` ssh mount (`RUN --mount=type=ssh`).
 - `labels` (Map of String) Image labels (equivalent to `LABEL` instructions).
-- `publish` (Block List) A registry/repository and the tags to publish. Multiple blocks publish to multiple targets in a single build. (see [below for nested schema](#nestedblock--publish))
+- `publish` (Block Set) A registry/repository and the tags to publish. Multiple blocks publish to multiple targets in a single build. All publish blocks must agree on the `push` and `insecure` flags. (see [below for nested schema](#nestedblock--publish))
 - `secrets` (Map of String, Sensitive) Build secrets in `id => value` form, exposed via `RUN --mount=type=secret,id=...`.
 - `secrets_base64` (Map of String, Sensitive) Build secrets in `id => base64(value)` form, decoded before use.
-- `ssh` (Block List) Explicit ssh agent/socket forwards (`RUN --mount=type=ssh,id=...`). (see [below for nested schema](#nestedblock--ssh))
+- `ssh` (Block Set) Explicit ssh agent/socket forwards (`RUN --mount=type=ssh,id=...`). (see [below for nested schema](#nestedblock--ssh))
 - `target` (String) Multi-stage build target to build.
 - `triggers` (Map of String) Arbitrary map; any change forces the image to be rebuilt.
 
@@ -120,7 +120,7 @@ Optional:
 
 Required:
 
-- `type` (String) Cache type: `registry`, `local`, `gha`, or `inline`.
+- `type` (String) Cache type: `registry`, `local`, `gha`, `inline`, `s3`, or `azblob`.
 
 Optional:
 
@@ -132,7 +132,7 @@ Optional:
 
 Required:
 
-- `type` (String) Cache type: `registry`, `local`, `gha`, or `inline`.
+- `type` (String) Cache type: `registry`, `local`, `gha`, `inline`, `s3`, or `azblob`.
 
 Optional:
 
@@ -182,6 +182,9 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# buildkit_image is imported by its digest URL (registry/repo@sha256:...).
-terraform import buildkit_image.app ghcr.io/org/app@sha256:abc123...
+# buildkit_image is imported by its fully-qualified digest reference
+# (registry/repo@sha256:<64-hex>). image_digest and a published entry are seeded
+# from the reference; context/dockerfile/platforms are reconciled from config on
+# the next plan.
+terraform import buildkit_image.app ghcr.io/org/app@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ```
