@@ -196,7 +196,7 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 					},
 				},
 			},
-			"publish": schema.SetNestedBlock{
+			"publish": schema.ListNestedBlock{
 				MarkdownDescription: "A registry/repository and the tags to publish. Multiple blocks publish to multiple targets in a single build. All publish blocks must agree on the `push` and `insecure` flags.",
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{

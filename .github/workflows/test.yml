@@ -105,9 +105,16 @@ jobs:
           cache: true
 
       - name: govulncheck
+        # Two findings come from github.com/docker/docker (GO-2026-4887,
+        # GO-2026-4883). They are daemon-side AuthZ/plugin-privilege issues that
+        # have NO fixed version in the docker/docker module (the fix only exists
+        # in github.com/moby/moby/v2, a different module path), and this provider
+        # only uses the docker client for daemon discovery, not the affected
+        # server code paths. They are filtered here until the upstream module
+        # path migration is available.
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          govulncheck ./...
+          ./scripts/govulncheck.sh
 
   acceptance:
     name: acceptance tests
@@ -168,6 +175,21 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Allow unprivileged user namespaces
+        # ubuntu-latest runners (Ubuntu 24.04+) ship with
+        # kernel.apparmor_restrict_unprivileged_userns=1, which blocks
+        # rootlesskit from creating the unprivileged user namespace it needs
+        # ("fork/exec /proc/self/exe: permission denied"). Relax the AppArmor
+        # restriction so the rootless embedded buildkitd can start. This only
+        # affects the ephemeral CI runner.
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo "apparmor_restrict_unprivileged_userns before: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          else
+            echo "apparmor_restrict_unprivileged_userns not present; nothing to relax"
+          fi
 
       - name: Assert no BuildKit endpoint is preconfigured
         run: |

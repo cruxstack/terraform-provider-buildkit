@@ -81,9 +81,23 @@ func startEmbeddedBuildkitd(ctx context.Context, opts embeddedOptions) (*resolve
 		"HOME="+homeOrTemp(),
 		"PATH="+tools.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
-	// surface daemon logs on the provider's stderr for debugging.
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	// Send daemon logs to a file inside runDir instead of sharing the provider's
+	// own os.Stdout/os.Stderr with the daemon. For rootless, rootlesskit
+	// re-execs buildkitd (and runc) into new namespaces and those grandchildren
+	// inherit whatever descriptors are wired here. If they inherited the
+	// provider's stderr, a long-lived/leaked daemon child would keep that
+	// descriptor open after the provider (or `go test` harness) exits, causing
+	// the parent to block on stdout/stderr EOF ("Test I/O incomplete ...
+	// WaitDelay expired"). A dedicated log file avoids leaking the parent's
+	// streams; the path is reported so logs remain discoverable.
+	logPath := filepath.Join(runDir, "buildkitd.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // path is provider-controlled inside runDir
+	if err != nil {
+		_ = os.RemoveAll(runDir)
+		return nil, fmt.Errorf("creating embedded buildkitd log file: %w", err)
+	}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 
 	// run the daemon (and, for rootless, its rootlesskit-reexeced children) in
 	// its own process group so cleanup can signal the whole group and avoid
@@ -91,9 +105,13 @@ func startEmbeddedBuildkitd(ctx context.Context, opts embeddedOptions) (*resolve
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
 		_ = os.RemoveAll(runDir)
 		return nil, fmt.Errorf("starting buildkitd: %w", err)
 	}
+	// The child holds its own dup of the log file descriptor; the parent no
+	// longer needs it open.
+	_ = logFile.Close()
 
 	pgid := cmd.Process.Pid
 	cleanup := func() {
