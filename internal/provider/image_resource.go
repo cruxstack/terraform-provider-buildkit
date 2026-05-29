@@ -137,7 +137,6 @@ func (r *imageResource) Schema(_ context.Context, _ resource.SchemaRequest, resp
 				Required:            true,
 				ElementType:         types.StringType,
 				MarkdownDescription: "Target platforms, e.g. `[\"linux/amd64\", \"linux/arm64\"]`.",
-				PlanModifiers:       []planmodifier.Set{},
 			},
 			"labels": schema.MapAttribute{
 				Optional:            true,
@@ -406,21 +405,18 @@ func (r *imageResource) build(ctx context.Context, m *imageResourceModel, diags 
 		return
 	}
 
-	secrets, err := mergeSecrets(ctx, m.Secrets, m.SecretsBase64, diags)
+	secrets := mergeSecrets(ctx, m.Secrets, m.SecretsBase64, diags)
 	if diags.HasError() {
 		return
 	}
-	_ = err
 
 	ssh := r.collectSSH(ctx, m, diags)
 	if diags.HasError() {
 		return
 	}
 
-	// expand publish blocks into image names. BuildKit supports a single image
-	// exporter per solve, so the push/insecure flags must be uniform across all
-	// publish blocks; mixed values are rejected rather than silently coerced
-	// (which previously OR-ed the flags and could downgrade a secure push).
+	// expand publish blocks into image names (one image exporter per solve, so
+	// the push/insecure flags must be uniform; see uniformPublishFlags).
 	var names []string
 	for _, p := range m.Publish {
 		var tags []string
@@ -562,7 +558,9 @@ func toCacheEntries(ctx context.Context, in []cacheEntryModel, diags *diag.Diagn
 	return out
 }
 
-func mergeSecrets(ctx context.Context, plain, b64 types.Map, diags *diag.Diagnostics) (map[string][]byte, error) {
+// mergeSecrets combines plaintext and base64-encoded secret maps into a single
+// id => value map. Decode/collection errors are reported via diags.
+func mergeSecrets(ctx context.Context, plain, b64 types.Map, diags *diag.Diagnostics) map[string][]byte {
 	out := map[string][]byte{}
 	if !plain.IsNull() {
 		m := map[string]string{}
@@ -583,7 +581,7 @@ func mergeSecrets(ctx context.Context, plain, b64 types.Map, diags *diag.Diagnos
 			out[k] = dec
 		}
 	}
-	return out, nil
+	return out
 }
 
 func stringSet(ctx context.Context, s types.Set, diags *diag.Diagnostics) []string {

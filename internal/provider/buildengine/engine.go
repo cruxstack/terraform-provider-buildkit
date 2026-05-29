@@ -6,7 +6,6 @@ package buildengine
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -241,9 +240,4 @@ func ImageExport(names []string, push, insecure bool) client.ExportEntry {
 		attrs["registry.insecure"] = "true"
 	}
 	return client.ExportEntry{Type: client.ExporterImage, Attrs: attrs}
-}
-
-// EnsureDir creates a directory if missing (helper for export targets).
-func EnsureDir(dir string) error {
-	return os.MkdirAll(dir, 0o755)
 }

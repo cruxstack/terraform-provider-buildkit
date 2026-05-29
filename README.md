@@ -96,6 +96,15 @@ resource "aws_lambda_function" "this" {
 }
 ```
 
+### Destroy behavior
+
+The two resources differ on `terraform destroy`:
+
+- `buildkit_image` is **non-destructive**: destroying it only drops the resource
+  from state. Pushed images are left untouched in the registry.
+- `buildkit_artifact` **removes the produced file/directory** from the host on
+  destroy.
+
 ## Choosing a BuildKit endpoint
 
 A Linux container runtime is required to execute a Dockerfile's `RUN` steps, so

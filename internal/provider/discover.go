@@ -95,12 +95,10 @@ func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoin
 		tried = append(tried, "auto-discovery (disabled)")
 	}
 
-	// 5. embedded rootless buildkitd (Linux only, opt-in). on non-Linux builds
-	// startEmbeddedBuildkitd always returns an error, which staticcheck flags as
-	// an always-true comparison (SA4023) for that GOOS; it is reachable on Linux.
+	// 5. embedded rootless buildkitd (Linux only, opt-in).
 	if opts.embedded {
 		ep, err := startEmbeddedBuildkitd(ctx)
-		if err != nil { //nolint:staticcheck // SA4023: only always-true on non-Linux builds
+		if err != nil { //nolint:staticcheck // SA4023: err is only always-non-nil on non-Linux builds
 			return nil, fmt.Errorf("embedded_buildkitd requested but failed to start: %w", err)
 		}
 		return ep, nil

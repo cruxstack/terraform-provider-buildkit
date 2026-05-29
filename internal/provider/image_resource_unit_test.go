@@ -102,7 +102,7 @@ func TestMergeSecrets(t *testing.T) {
 		"enc": "ZGVjb2RlZA==",
 	})
 
-	out, _ := mergeSecrets(ctx, plain, b64, &diags)
+	out := mergeSecrets(ctx, plain, b64, &diags)
 	if diags.HasError() {
 		t.Fatalf("unexpected diags: %v", diags)
 	}
@@ -121,7 +121,7 @@ func TestMergeSecretsInvalidBase64(t *testing.T) {
 	b64, _ := types.MapValueFrom(ctx, types.StringType, map[string]string{
 		"bad": "not!base64!",
 	})
-	_, _ = mergeSecrets(ctx, types.MapNull(types.StringType), b64, &diags)
+	_ = mergeSecrets(ctx, types.MapNull(types.StringType), b64, &diags)
 	if !diags.HasError() {
 		t.Fatal("expected a diagnostic for invalid base64")
 	}
