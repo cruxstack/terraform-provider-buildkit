@@ -98,7 +98,7 @@ func (p *buildkitProvider) Metadata(_ context.Context, _ provider.MetadataReques
 func (p *buildkitProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		MarkdownDescription: "Builds container images and filesystem artifacts from a Dockerfile using BuildKit, without requiring the Docker daemon as the build mechanism. " +
-			"Connects to a local or remote `buildkitd` gRPC endpoint (with optional auto-discovery), can optionally run an embedded rootless buildkitd on Linux, and authenticates to registries via explicit credentials and/or the host Docker config.",
+			"Connects to a local or remote `buildkitd` gRPC endpoint (with optional auto-discovery), and on Linux can automatically provision and supervise an embedded `buildkitd` (downloading a pinned, checksum-verified release) so builds work on hosts with no Docker or BuildKit preinstalled. Authenticates to registries via explicit credentials and/or the host Docker config.",
 		Attributes: map[string]schema.Attribute{
 			"buildkit_address": schema.StringAttribute{
 				Optional:            true,
@@ -115,8 +115,12 @@ func (p *buildkitProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 				MarkdownDescription: "When `true` (default), registry credentials are resolved from the host's Docker config (`~/.docker/config.json`) and its configured credential helpers (e.g. `osxkeychain`, `ecr-login`, `gcr`) as a fallback after explicit `registry_auth` blocks. Set to `false` for fully hermetic credential resolution from `registry_auth` only.",
 			},
 			"embedded_buildkitd": schema.BoolAttribute{
-				Optional:            true,
-				MarkdownDescription: "When `true` (Linux only), and no endpoint is configured or discovered, the provider starts and supervises a rootless `buildkitd` in-process for the lifetime of the provider. On non-Linux hosts this is an error. Defaults to `false`.",
+				Optional: true,
+				MarkdownDescription: "Controls the embedded `buildkitd` (Linux only). Tri-state:\n\n" +
+					"- **unset (default)**: *auto* — if no endpoint is configured or discovered, the provider provisions and supervises a `buildkitd` for the lifetime of the provider. The `buildkitd` (and `rootlesskit` for unprivileged use) binaries are resolved from `BUILDKIT_EMBEDDED_BIN_DIR`, a provider-managed cache, the host `PATH`, or a pinned, checksum-verified download from the upstream GitHub releases (requires outbound network on first use; results are cached). On non-Linux hosts this fallback is unavailable.\n" +
+					"- **`true`**: *force* — always use the embedded `buildkitd` (after an explicit `buildkit_address` / `BUILDKIT_HOST`), skipping auto-discovery.\n" +
+					"- **`false`**: *never* — disable the embedded `buildkitd` entirely; resolution fails if no endpoint is configured or discovered.\n\n" +
+					"Rootless use (non-root euid) requires user-namespace support and `/etc/subuid` + `/etc/subgid` entries for the user. Set `BUILDKIT_EMBEDDED_BIN_DIR` to a directory containing the binaries for fully air-gapped operation.",
 			},
 		},
 		Blocks: map[string]schema.Block{
@@ -171,9 +175,17 @@ func (p *buildkitProvider) Configure(ctx context.Context, req provider.Configure
 		dockerConfig = config.DockerConfig.ValueBool()
 	}
 
-	embedded := false
+	// embedded_buildkitd is tri-state:
+	//   unset -> auto  (Linux fallback when nothing else is found; default)
+	//   true  -> force (always use embedded, after explicit address/BUILDKIT_HOST)
+	//   false -> never (disable embedded entirely)
+	embedded := embeddedAuto
 	if !config.EmbeddedBuildkitd.IsNull() && !config.EmbeddedBuildkitd.IsUnknown() {
-		embedded = config.EmbeddedBuildkitd.ValueBool()
+		if config.EmbeddedBuildkitd.ValueBool() {
+			embedded = embeddedForce
+		} else {
+			embedded = embeddedNever
+		}
 	}
 
 	auth := buildengine.AuthConfig{

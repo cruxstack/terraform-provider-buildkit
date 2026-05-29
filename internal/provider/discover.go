@@ -28,11 +28,33 @@ type resolvedEndpoint struct {
 	cleanup func()
 }
 
+// embeddedMode is the tri-state for the embedded buildkitd behaviour.
+type embeddedMode int
+
+const (
+	// embeddedAuto starts a provisioned embedded buildkitd as a last resort on
+	// Linux when nothing else is found. This is the default.
+	embeddedAuto embeddedMode = iota
+	// embeddedForce always uses an embedded buildkitd (after explicit address /
+	// BUILDKIT_HOST), ignoring auto-discovery.
+	embeddedForce
+	// embeddedNever disables embedded buildkitd entirely.
+	embeddedNever
+)
+
 // resolveOptions controls endpoint resolution.
 type resolveOptions struct {
 	address      string
 	autodiscover bool
-	embedded     bool
+	embedded     embeddedMode
+}
+
+// embeddedOptions controls how the embedded buildkitd is provisioned.
+type embeddedOptions struct {
+	// allowDownload permits fetching pinned release tarballs when binaries are
+	// not already present (override dir / cache / PATH). Disable for hermetic or
+	// air-gapped setups that must fail rather than reach the network.
+	allowDownload bool
 }
 
 // resolveBuildkit finds and connects to a buildkit endpoint.
@@ -70,6 +92,16 @@ func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoin
 	}
 	tried = append(tried, "BUILDKIT_HOST (unset)")
 
+	// 2.5 forced embedded: when explicitly requested, use an embedded buildkitd
+	// before attempting any discovery.
+	if opts.embedded == embeddedForce {
+		ep, err := startEmbeddedBuildkitd(ctx, embeddedOptions{allowDownload: true})
+		if err != nil {
+			return nil, fmt.Errorf("embedded_buildkitd=true requested but failed to start: %w", err)
+		}
+		return ep, nil
+	}
+
 	if opts.autodiscover {
 		// 3. docker engine embedded buildkit via /grpc.
 		if c, src, err := dialDockerGRPC(ctx); err == nil {
@@ -95,13 +127,18 @@ func resolveBuildkit(ctx context.Context, opts resolveOptions) (*resolvedEndpoin
 		tried = append(tried, "auto-discovery (disabled)")
 	}
 
-	// 5. embedded rootless buildkitd (Linux only, opt-in).
-	if opts.embedded {
-		ep, err := startEmbeddedBuildkitd(ctx)
-		if err != nil { //nolint:staticcheck // SA4023: err is only always-non-nil on non-Linux builds
-			return nil, fmt.Errorf("embedded_buildkitd requested but failed to start: %w", err)
+	// 5. embedded buildkitd as a last resort. On Linux this is the default
+	// (embeddedAuto): when nothing else is reachable, provision and supervise a
+	// buildkitd so builds work with no Docker/BuildKit preinstalled. On non-Linux
+	// hosts startEmbeddedBuildkitd returns a clear error.
+	if opts.embedded == embeddedAuto {
+		ep, err := startEmbeddedBuildkitd(ctx, embeddedOptions{allowDownload: true})
+		if err == nil {
+			return ep, nil
 		}
-		return ep, nil
+		tried = append(tried, "embedded buildkitd ("+err.Error()+")")
+	} else {
+		tried = append(tried, "embedded buildkitd (disabled)")
 	}
 
 	return nil, fmt.Errorf(

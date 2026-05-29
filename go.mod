@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/docker/cli v29.3.1+incompatible
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/gofrs/flock v0.13.0
 	github.com/google/go-containerregistry v0.20.7
 	github.com/hashicorp/terraform-plugin-framework v1.19.0
 	github.com/hashicorp/terraform-plugin-framework-validators v0.19.0
@@ -52,7 +53,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect

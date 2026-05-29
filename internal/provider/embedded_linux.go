@@ -12,32 +12,44 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	bkclient "github.com/moby/buildkit/client"
+
+	"github.com/cruxstack/terraform-provider-buildkit/internal/provider/buildkitbin"
 )
 
-// startEmbeddedBuildkitd locates a `buildkitd` binary and supervises it as a
-// rootless child process for the lifetime of the provider, exposing it on a
-// private unix socket. This mirrors the approach of buildctl-daemonless.sh
-// rather than embedding the daemon in-process (which would require bundling
-// runc/rootlesskit and managing subuid/subgid, /proc, and snapshotter setup).
+// startEmbeddedBuildkitd provisions the `buildkitd` binary (downloading a
+// pinned, checksum-verified release when necessary) and supervises it as a
+// child process for the lifetime of the provider, exposing it on a private unix
+// socket. This mirrors the approach of buildctl-daemonless.sh rather than
+// embedding the daemon in-process (which would require bundling runc/rootlesskit
+// and managing subuid/subgid, /proc, and snapshotter setup).
 //
-// Requirements on the host:
-//   - a `buildkitd` binary on PATH (the moby/buildkit release binaries)
-//   - for unprivileged use, `rootlesskit` on PATH and configured
-//     /etc/subuid + /etc/subgid entries (see rootlesscontaine.rs)
-//
-// If `buildkitd` is not found, a clear, actionable error is returned.
-func startEmbeddedBuildkitd(ctx context.Context) (*resolvedEndpoint, error) {
-	buildkitd, err := exec.LookPath("buildkitd")
-	if err != nil {
-		return nil, fmt.Errorf(
-			"buildkitd binary not found on PATH. Install it from https://github.com/moby/buildkit/releases " +
-				"(and `rootlesskit` for unprivileged use), or set buildkit_address / BUILDKIT_HOST to an existing endpoint",
-		)
+// Binaries are resolved via the buildkitbin package, which prefers (in order) an
+// explicit BUILDKIT_EMBEDDED_BIN_DIR, a provider-managed cache, the host PATH,
+// and finally a download of the pinned release. For unprivileged use,
+// `rootlesskit` is also provisioned and configured /etc/subuid + /etc/subgid
+// entries are required on the host (see rootlesscontaine.rs).
+func startEmbeddedBuildkitd(ctx context.Context, opts embeddedOptions) (*resolvedEndpoint, error) {
+	rootless := os.Geteuid() != 0
+
+	if rootless {
+		if err := preflightRootless(); err != nil {
+			return nil, err
+		}
 	}
+
+	tools, err := buildkitbin.Ensure(ctx, buildkitbin.Options{
+		NeedRootlesskit: rootless,
+		AllowDownload:   opts.allowDownload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	buildkitd := tools.Buildkitd
 
 	runDir, err := os.MkdirTemp(embeddedRuntimeRoot(), "buildkit-tf-")
 	if err != nil {
@@ -47,7 +59,6 @@ func startEmbeddedBuildkitd(ctx context.Context) (*resolvedEndpoint, error) {
 	addr := "unix://" + sock
 	root := filepath.Join(runDir, "data")
 
-	rootless := os.Geteuid() != 0
 	var cmd *exec.Cmd
 	args := []string{
 		"--addr", addr,
@@ -57,23 +68,18 @@ func startEmbeddedBuildkitd(ctx context.Context) (*resolvedEndpoint, error) {
 		// no-process-sandbox avoids needing systempaths=unconfined; acceptable
 		// because the daemon already runs unprivileged.
 		args = append(args, "--oci-worker-no-process-sandbox")
-		if rk, err := exec.LookPath("rootlesskit"); err == nil {
-			full := append([]string{buildkitd}, args...)
-			cmd = exec.Command(rk, full...) //nolint:gosec // args are provider-controlled
-		} else {
-			return nil, fmt.Errorf(
-				"running as a non-root user but `rootlesskit` was not found on PATH; " +
-					"install rootlesskit and configure /etc/subuid + /etc/subgid, or run as root, " +
-					"or point at an existing endpoint via buildkit_address / BUILDKIT_HOST",
-			)
-		}
+		full := append([]string{buildkitd}, args...)
+		cmd = exec.Command(tools.Rootlesskit, full...) //nolint:gosec // args are provider-controlled
 	} else {
 		cmd = exec.Command(buildkitd, args...) //nolint:gosec // args are provider-controlled
 	}
 
+	// prepend the provisioned bin dir to PATH so buildkitd (and rootlesskit) can
+	// exec the bundled buildkit-runc and other helpers.
 	cmd.Env = append(os.Environ(),
 		"XDG_RUNTIME_DIR="+runDir,
 		"HOME="+homeOrTemp(),
+		"PATH="+tools.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	// surface daemon logs on the provider's stderr for debugging.
 	cmd.Stdout = os.Stderr
@@ -112,9 +118,73 @@ func startEmbeddedBuildkitd(ctx context.Context) (*resolvedEndpoint, error) {
 
 	return &resolvedEndpoint{
 		client:  client,
-		source:  "embedded buildkitd (" + pidString(cmd) + ", " + addr + ")",
+		source:  "embedded buildkitd (" + pidString(cmd) + ", " + addr + ", binaries: " + tools.Source + ")",
 		cleanup: cleanup,
 	}, nil
+}
+
+// preflightRootless checks the host prerequisites for running buildkitd as an
+// unprivileged user and returns an actionable error when they are missing. It is
+// intentionally permissive: it only fails for conditions that are known to make
+// rootless buildkitd unusable, and otherwise lets the daemon attempt to start.
+func preflightRootless() error {
+	// rootless requires entries in /etc/subuid and /etc/subgid for the current
+	// user (or an enclosing user namespace already providing the mapping).
+	if !hasSubIDMapping() {
+		user := currentUserName()
+		return fmt.Errorf(
+			"running as an unprivileged user (euid=%d) but no /etc/subuid or /etc/subgid "+
+				"mapping was found for %q, which rootless buildkitd requires. "+
+				"Add entries (e.g. `%s:100000:65536` to both files), run the provider as root "+
+				"(e.g. inside a container), or set buildkit_address / BUILDKIT_HOST to an existing endpoint",
+			os.Geteuid(), user, user,
+		)
+	}
+	return nil
+}
+
+// hasSubIDMapping reports whether /etc/subuid and /etc/subgid contain an entry
+// for the current user (by name or uid). If the files cannot be read at all we
+// assume a managed/namespaced environment and do not block.
+func hasSubIDMapping() bool {
+	name := currentUserName()
+	uid := strconv.Itoa(os.Getuid())
+	uidMapped := subIDFileMentions("/etc/subuid", name, uid)
+	gidMapped := subIDFileMentions("/etc/subgid", name, uid)
+	return uidMapped && gidMapped
+}
+
+func subIDFileMentions(path, name, uid string) bool {
+	data, err := os.ReadFile(path) //nolint:gosec // fixed, well-known system path
+	if err != nil {
+		// Unreadable/absent: don't block; the daemon may run inside an existing
+		// user namespace that already provides mappings.
+		return true
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		owner := line
+		if i := strings.IndexByte(line, ':'); i >= 0 {
+			owner = line[:i]
+		}
+		if owner == name || owner == uid {
+			return true
+		}
+	}
+	return false
+}
+
+func currentUserName() string {
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	if u := os.Getenv("LOGNAME"); u != "" {
+		return u
+	}
+	return strconv.Itoa(os.Getuid())
 }
 
 func waitForEmbedded(ctx context.Context, addr string, timeout time.Duration) (*bkclient.Client, error) {
