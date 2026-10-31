@@ -69,7 +69,25 @@ and this project adheres to
   is signalled on cleanup, avoiding orphaned `buildkitd`/`runc` processes.
 - A warning is logged when connecting to a non-loopback `tcp://` endpoint, which
   the BuildKit client speaks unencrypted.
-- Bumped `github.com/moby/buildkit` to `v0.29.0`.
+- Bumped `github.com/moby/buildkit` to `v0.31.2`.
+
+### Fixed
+
+- Auto-discovery of the Docker-engine embedded BuildKit now follows the Docker
+  CLI's current context and falls back to the per-user sockets of OrbStack,
+  Docker Desktop, Colima and Rancher Desktop. Previously it only tried
+  `DOCKER_HOST` or `/var/run/docker.sock`, so it failed on hosts without that
+  socket, such as OrbStack without its `/var/run/docker.sock` symlink.
+
+### Security
+
+- Built with Go 1.26.10 and bumped dependencies with reachable advisories:
+  `containerd/containerd/v2` v2.2.10, `google.golang.org/grpc` v1.83.2,
+  OpenTelemetry v1.45.0, `golang.org/x/net` v0.62.0, `golang.org/x/text`
+  v0.43.0, `golang.org/x/crypto` v0.58.0, `klauspost/compress` v1.18.7 and
+  `in-toto/in-toto-golang` v0.11.0.
+- `scripts/govulncheck.sh` now fails only on findings with a call trace, as
+  documented, rather than on every advisory in a required module.
 
 ### Notes
 

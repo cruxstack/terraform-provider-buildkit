@@ -31,7 +31,7 @@ export GOTOOLCHAIN
 # (i.e. with a call trace). -scan symbol (the default) only reports reachable
 # vulnerabilities.
 found_ids=$(govulncheck -format json ./... \
-  | jq -r 'select(.finding != null) | .finding.osv' \
+  | jq -r 'select(.finding != null and (.finding.trace[0].function // "") != "") | .finding.osv' \
   | sort -u)
 
 if [ -z "${found_ids}" ]; then

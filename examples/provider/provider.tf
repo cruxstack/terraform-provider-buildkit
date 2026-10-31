@@ -7,8 +7,9 @@ terraform {
 }
 
 # With no configuration, the provider auto-discovers a BuildKit endpoint:
-# BUILDKIT_HOST, then the Docker-engine embedded BuildKit (OrbStack / Docker
-# Desktop / Colima) via the daemon /grpc endpoint, then local buildkitd sockets.
+# BUILDKIT_HOST, then the Docker-engine embedded BuildKit via the daemon /grpc
+# endpoint (DOCKER_HOST, the current Docker context, or the OrbStack / Docker
+# Desktop / Colima / Rancher Desktop socket), then local buildkitd sockets.
 provider "buildkit" {}
 
 # Target an explicit endpoint (e.g. a standalone rootless buildkitd in CI) and

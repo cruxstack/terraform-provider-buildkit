@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -199,20 +200,41 @@ func isLoopbackHost(host string) bool {
 // dialDockerGRPC reaches the buildkit instance compiled into the docker engine
 // (used by OrbStack / Docker Desktop / Colima with the default "docker" driver)
 // via the undocumented but buildx-relied-upon /grpc endpoint on the docker
-// socket. the docker socket is used purely as a transport.
+// socket. the docker socket is used purely as a transport. daemons are tried in
+// dockerHostCandidates order and the first usable one wins.
 func dialDockerGRPC(ctx context.Context) (*bkclient.Client, string, error) {
-	dcli, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
+	var failures []string
+	for _, cand := range dockerHostCandidates() {
+		if cand.err != nil {
+			failures = append(failures, cand.label()+": "+cand.err.Error())
+			continue
+		}
+		c, err := dialDockerGRPCHost(ctx, cand)
+		if err != nil {
+			failures = append(failures, cand.label()+": "+err.Error())
+			continue
+		}
+		return c, "docker engine /grpc (" + cand.label() + ")", nil
+	}
+	return nil, "", errors.New(strings.Join(failures, "; "))
+}
+
+func dialDockerGRPCHost(ctx context.Context, cand dockerHostCandidate) (*bkclient.Client, error) {
+	opts := []dockerclient.Opt{dockerclient.WithAPIVersionNegotiation()}
+	if cand.fromEnv {
+		opts = append(opts, dockerclient.FromEnv)
+	} else {
+		opts = append(opts, dockerclient.WithHost(cand.host))
+	}
+	dcli, err := dockerclient.NewClientWithOpts(opts...)
 	if err != nil {
-		return nil, "", fmt.Errorf("docker client: %w", err)
+		return nil, fmt.Errorf("docker client: %w", err)
 	}
 
 	// confirm the daemon is reachable before attempting the hijack.
 	if _, err := dcli.Ping(ctx); err != nil {
 		_ = dcli.Close()
-		return nil, "", fmt.Errorf("docker daemon unreachable: %w", err)
+		return nil, fmt.Errorf("docker daemon unreachable: %w", err)
 	}
 
 	c, err := bkclient.New(ctx, "",
@@ -222,16 +244,14 @@ func dialDockerGRPC(ctx context.Context) (*bkclient.Client, string, error) {
 	)
 	if err != nil {
 		_ = dcli.Close()
-		return nil, "", fmt.Errorf("buildkit /grpc dial: %w", err)
+		return nil, fmt.Errorf("buildkit /grpc dial: %w", err)
 	}
 	if err := validate(ctx, c); err != nil {
 		_ = c.Close()
 		_ = dcli.Close()
-		return nil, "", fmt.Errorf("buildkit /grpc validate: %w", err)
+		return nil, fmt.Errorf("buildkit /grpc validate: %w", err)
 	}
-
-	host := dcli.DaemonHost()
-	return c, "docker engine /grpc (transport: " + host + ")", nil
+	return c, nil
 }
 
 // validate pings the buildkit control API to confirm a usable endpoint.

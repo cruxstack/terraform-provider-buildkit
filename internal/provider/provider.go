@@ -107,7 +107,9 @@ func (p *buildkitProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 			"buildkit_autodiscover": schema.BoolAttribute{
 				Optional: true,
 				MarkdownDescription: "When `true` (default) and no explicit address or `BUILDKIT_HOST` is set, the provider attempts to discover a BuildKit endpoint: " +
-					"the Docker-engine embedded BuildKit via the daemon `/grpc` endpoint (OrbStack / Docker Desktop / Colima), then conventional local buildkitd sockets. " +
+					"the Docker-engine embedded BuildKit via the daemon `/grpc` endpoint, then conventional local buildkitd sockets. " +
+					"The daemon is `DOCKER_HOST` or `DOCKER_CONTEXT` when set; otherwise the Docker CLI's current context, the default socket, " +
+					"then the per-user sockets of OrbStack, Docker Desktop, Colima and Rancher Desktop. " +
 					"Set to `false` to require an explicit address / `BUILDKIT_HOST` (recommended for hermetic CI).",
 			},
 			"docker_config": schema.BoolAttribute{

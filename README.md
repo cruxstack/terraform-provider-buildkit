@@ -114,7 +114,11 @@ the provider needs a `buildkitd` to talk to. It is resolved in this order:
    helpers like `docker-container://`.
 2. `BUILDKIT_HOST` environment variable.
 3. *(auto-discovery)* Docker-engine embedded BuildKit via the daemon `/grpc`
-   endpoint (OrbStack / Docker Desktop / Colima).
+   endpoint. The daemon is `DOCKER_HOST` or `DOCKER_CONTEXT` when set;
+   otherwise the Docker CLI's current context, the default socket, then the
+   per-user sockets of OrbStack, Docker Desktop, Colima and Rancher Desktop, so
+   a stale `default` context or a missing `/var/run/docker.sock` doesn't hide a
+   running engine.
 4. *(auto-discovery)* Conventional local `buildkitd` sockets.
 5. *(opt-in, Linux)* `embedded_buildkitd = true` — supervise a `buildkitd`
    binary found on PATH for the lifetime of the provider.
