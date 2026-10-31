@@ -71,6 +71,14 @@ and this project adheres to
   the BuildKit client speaks unencrypted.
 - Bumped `github.com/moby/buildkit` to `v0.29.0`.
 
+### Fixed
+
+- Auto-discovery of the Docker-engine embedded BuildKit now follows the Docker
+  CLI's current context and falls back to the per-user sockets of OrbStack,
+  Docker Desktop, Colima and Rancher Desktop. Previously it only tried
+  `DOCKER_HOST` or `/var/run/docker.sock`, so it failed on hosts without that
+  socket, such as OrbStack without its `/var/run/docker.sock` symlink.
+
 ### Notes
 
 - This is the first registry-published release line. The previous local-only

@@ -21,8 +21,9 @@ terraform {
 }
 
 # With no configuration, the provider auto-discovers a BuildKit endpoint:
-# BUILDKIT_HOST, then the Docker-engine embedded BuildKit (OrbStack / Docker
-# Desktop / Colima) via the daemon /grpc endpoint, then local buildkitd sockets.
+# BUILDKIT_HOST, then the Docker-engine embedded BuildKit via the daemon /grpc
+# endpoint (DOCKER_HOST, the current Docker context, or the OrbStack / Docker
+# Desktop / Colima / Rancher Desktop socket), then local buildkitd sockets.
 provider "buildkit" {}
 
 # Target an explicit endpoint (e.g. a standalone rootless buildkitd in CI) and
@@ -54,7 +55,7 @@ provider "buildkit" {}
 ### Optional
 
 - `buildkit_address` (String) gRPC address of a running buildkitd (e.g. `unix:///run/buildkit/buildkitd.sock`, `tcp://127.0.0.1:1234`, or `docker-container://buildkitd`). When set, auto-discovery is skipped. When unset, the `BUILDKIT_HOST` environment variable is used, then auto-discovery (if enabled).
-- `buildkit_autodiscover` (Boolean) When `true` (default) and no explicit address or `BUILDKIT_HOST` is set, the provider attempts to discover a BuildKit endpoint: the Docker-engine embedded BuildKit via the daemon `/grpc` endpoint (OrbStack / Docker Desktop / Colima), then conventional local buildkitd sockets. Set to `false` to require an explicit address / `BUILDKIT_HOST` (recommended for hermetic CI).
+- `buildkit_autodiscover` (Boolean) When `true` (default) and no explicit address or `BUILDKIT_HOST` is set, the provider attempts to discover a BuildKit endpoint: the Docker-engine embedded BuildKit via the daemon `/grpc` endpoint, then conventional local buildkitd sockets. The daemon is `DOCKER_HOST` or `DOCKER_CONTEXT` when set; otherwise the Docker CLI's current context, the default socket, then the per-user sockets of OrbStack, Docker Desktop, Colima and Rancher Desktop. Set to `false` to require an explicit address / `BUILDKIT_HOST` (recommended for hermetic CI).
 - `docker_config` (Boolean) When `true` (default), registry credentials are resolved from the host's Docker config (`~/.docker/config.json`) and its configured credential helpers (e.g. `osxkeychain`, `ecr-login`, `gcr`) as a fallback after explicit `registry_auth` blocks. Set to `false` for fully hermetic credential resolution from `registry_auth` only.
 - `embedded_buildkitd` (Boolean) Controls the embedded `buildkitd` (Linux only). Tri-state:
 
